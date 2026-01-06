@@ -8,3 +8,4 @@ bitvec = "*"
 rand = "*"
 strum = { version = "*", features = ["derive"] }
 crossterm = "*"
+ndarray = "*"
