@@ -1,21 +1,23 @@
 use std::cmp::max;
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
-use std::io::{stdout};
+use std::io::{Stdout, stdout};
 use std::iter;
 
 use bitvec::prelude::*;
 use itertools::{EitherOrBoth, Itertools};
-use rand::rng;
+use rand::{
+	seq::IndexedRandom,
+	rng,
+};
 
 use crossterm::{
 	ExecutableCommand,
-	style::{Print, SetForegroundColor, Color},
+	style::{Print, Color, SetColors, Colors, ResetColor},
 	terminal::{self, Clear, ClearType},
-	cursor::{MoveTo, MoveToNextLine, self},
+	cursor::{self, MoveTo, MoveToNextLine},
 	event::{self, Event, KeyCode, poll},
 };
-use rand::seq::IndexedRandom;
 
 // -------------
 #[derive(Debug, Clone, Copy)]
@@ -37,47 +39,163 @@ impl Size {
 // -------------
 type Pixel = [char; 2];
 
-struct GUIUpdateData<'a> {
-	board: &'a Board,
-	current_figure: &'a Figure,
-	current_figure_position: &'a Position<i8>,
+struct Board {
+	size: Size,
+	cells: BitVec,
+}
+
+impl Board {
+	pub fn new(size: Size) -> Self {
+		Self {size, cells: bitvec![0; size.area()] }
+	}
+}
+
+// Хз какое название дать :/
+// Замена глобальной функции calc_width_for_lines(lines: &Vec<String>) -> usize
+trait StringsVecForUI {
+	fn required_width(&self) -> usize;
+}
+
+impl StringsVecForUI for Vec<String> {
+	fn required_width(&self) -> usize {
+		self.iter()
+			.map(|s| s.chars().count())
+			.max()
+			.unwrap_or(0)
+	}
+}
+
+fn collect_last_released_keys() -> UniversalResult<Vec<KeyCode>>{
+	let mut events_buffer: VecDeque<event::KeyEvent> = VecDeque::new();
+
+	while poll(Duration::from_millis(0))? {
+		match event::read()? {
+			Event::Key(key_event) => {
+				events_buffer.push_back(key_event);
+			}
+			_ => {}
+		}
+	}
+
+	Ok(Vec::from_iter(
+		events_buffer.iter()
+			.filter(|event| event.is_release())
+			.map(|event| event.code)
+	))
+}
+
+struct FrameUpdateData {
+	_delta_time: Duration,
+	frame_start_time: Instant,
+}
+
+struct GameState {
+	is_running: bool,
+
+	current_figure: &'static Figure,
+	current_figure_position: Position<i8>,
 	current_figure_rotation: Direction,
-	next_figure: &'a Figure,
-	round_time: Duration,
-	level: u16,
+
+	next_figure: &'static Figure,
+	last_figure_lowering_time: Instant,
+	lines_hit: u16,
 	score: u16,
+	start_time: Instant,
+
+	board: Board,
 }
+impl GameState {
+	const BASE_FIGURE_LOWERING_DURATION: Duration = Duration::from_millis(2500); // 2.5s  | 2 раза за 5 секунд
+	const MIN_FIGURE_LOWERING_DURATION: Duration = Duration::from_millis(250);   // 0.25s | 4 раза в секунду
 
-fn calc_width_for_lines(lines: &Vec<String>) -> usize {
-	lines.iter()
-		.map(|s| s.chars().count())
-		.max()
-		.unwrap_or(0)
-}
+	pub fn new() -> Self {
+		Self {
+			is_running: true,
 
-struct GUI;
-impl GUI {
-	pub const FOREGROUND_COLOR: Color = Color::Green;
+			current_figure: Figure::get_random(),
+			current_figure_position: Position { x: 0, y: 0 },
+			current_figure_rotation: Direction::South,
 
-	const EMPTY_CELL:		Pixel = [' ', '.'];
-	const FIGURE_CELL:		Pixel = ['[', ']'];
-	const LEFT_BORDER:		Pixel = ['<', '!'];
-	const RIGHT_BORDER:		Pixel = ['!', '>'];
-	const BOTTOM_BORDER:	Pixel = ['=', '='];
-	const BOTTOM_CLOSING:	Pixel = ['\\','/'];
-	const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = [' ', ' '];
-	const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = [' ', ' '];
+			next_figure: Figure::get_random(),
+			last_figure_lowering_time: Instant::now(),
+			lines_hit: 0,
+			score: 0,
+			start_time: Instant::now(),
 
-	pub fn update(&self, data: &GUIUpdateData) -> Result<(), Box<dyn std::error::Error>> {
+			board: Board::new(Size {height: 15, width: 10}),
+		}
+	}
+
+	pub fn is_running(&self) -> bool {
+		self.is_running
+	}
+
+	pub fn stop(&mut self) {
+		self.is_running = false;
+	}
+
+	pub fn update(&mut self, data: &FrameUpdateData) -> UniversalProcedureResult {
+		let keys_to_process = collect_last_released_keys()?;
+
+		if !keys_to_process.is_empty() {
+			for key_code in keys_to_process.iter() {
+				match key_code {
+					KeyCode::Esc => {
+						self.stop();
+						return Ok(());
+					}
+					KeyCode::Down => {
+						self.current_figure_position.y += 1;
+					}
+					KeyCode::Left => {
+						self.current_figure_position.x -= 1;
+					}
+					KeyCode::Right => {
+						self.current_figure_position.x += 1;
+					}
+					KeyCode::Char('q') => {
+						self.rotate_current_figure(false);
+					}
+					KeyCode::Char('e') => {
+						self.rotate_current_figure(true);
+					}
+					_ => ()
+				}
+			}
+		}
+
+		// Опускание фигуры
+		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.get_figure_lowering_duration() {
+			// self.current_figure_position.y += 1; // Временно
+			self.last_figure_lowering_time = data.frame_start_time;
+		}
+
+		Ok(())
+	}
+
+	// Если добавлять другие состояния по типу этого (с методами update & update_gui)
+	// То преобразовать результат этой функции в Vec<String> и написать специальный GUIDrawler
+	// Который будет выполнять всю общую логику
+	// Если такой конечно будет, а то сейчас чуть переделал и его почти не осталось
+	pub fn update_gui(&self) -> UniversalProcedureResult {
+		const EMPTY_CELL:		Pixel = [' ', '.'];
+		const FIGURE_CELL:		Pixel = ['[', ']'];
+		const LEFT_BORDER:		Pixel = ['<', '!'];
+		const RIGHT_BORDER:		Pixel = ['!', '>'];
+		const BOTTOM_BORDER:	Pixel = ['=', '='];
+		const BOTTOM_CLOSING:	Pixel = ['\\','/'];
+		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = [' ', ' '];
+		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = [' ', ' '];
+
 		let mut out = stdout();
 		out.execute(MoveTo(0, 0))?;
 
 		let statistics_part: Vec<String> = {
-			let round_total_seconds = data.round_time.as_secs();
+			let round_total_seconds = self.start_time.elapsed().as_secs();
 			let label_and_value = [
-				("УРОВЕНЬ:", data.level.to_string()),
+				("УРОВЕНЬ:", self.get_level().to_string()),
 				("ВРЕМЯ:", 	format!("{}:{:02}", round_total_seconds / 60, round_total_seconds % 60)),
-				("СЧЁТ:", 	data.score.to_string()),
+				("СЧЁТ:", 	self.score.to_string()),
 			];
 
 
@@ -103,7 +221,7 @@ impl GUI {
 				"  []    ".to_string()
 			];
 
-			let actual_width = calc_width_for_lines(&lines);
+			let actual_width = lines.required_width();
 			// Пустая линия
 			lines.push(String::from_iter(iter::repeat(' ').take(actual_width)));
 
@@ -116,18 +234,18 @@ impl GUI {
 
 		let board_part: Vec<String> = {
 			let mut lines = vec![];
-			let board_width = data.board.size.width;
+			let board_width = self.board.size.width;
 
-			for row in 0..data.board.size.height {
+			for row in 0..self.board.size.height {
 				let start_index = row * board_width;
-				let cells_row = &data.board.cells[start_index..start_index + board_width];
+				let cells_row = &self.board.cells[start_index..start_index + board_width];
 
 				lines.push(
-					iter::once(Self::LEFT_BORDER)
+					iter::once(LEFT_BORDER)
 					.chain(cells_row.iter().map(|cell| {
-						if *cell {Self::FIGURE_CELL} else {Self::EMPTY_CELL}
+						if *cell {FIGURE_CELL} else {EMPTY_CELL}
 					}))
-					.chain(iter::once(Self::RIGHT_BORDER))
+					.chain(iter::once(RIGHT_BORDER))
 					.flatten()
 					.collect::<String>()
 				);
@@ -135,18 +253,18 @@ impl GUI {
 
 			// Bottom line
 			lines.push(
-				iter::once(Self::LEFT_BORDER)
-				.chain(iter::repeat(Self::BOTTOM_BORDER).take(board_width))
-				.chain(iter::once(Self::RIGHT_BORDER))
+				iter::once(LEFT_BORDER)
+				.chain(iter::repeat(BOTTOM_BORDER).take(board_width))
+				.chain(iter::once(RIGHT_BORDER))
 				.flatten()
 				.collect::<String>()
 			);
 
 			// Closing line
 			lines.push(
-				iter::once(Self::BOTTOM_CLOSING_LEFT_BORDER)
-				.chain(iter::repeat(Self::BOTTOM_CLOSING).take(board_width))
-				.chain(iter::once(Self::BOTTOM_CLOSING_RIGHT_BORDER))
+				iter::once(BOTTOM_CLOSING_LEFT_BORDER)
+				.chain(iter::repeat(BOTTOM_CLOSING).take(board_width))
+				.chain(iter::once(BOTTOM_CLOSING_RIGHT_BORDER))
 				.flatten()
 				.collect::<String>()
 			);
@@ -154,8 +272,8 @@ impl GUI {
 			lines
 		};
 
-		let stat_part_width = calc_width_for_lines(&statistics_part);
-		let board_part_width = calc_width_for_lines(&board_part);
+		let stat_part_width = statistics_part.required_width();
+		let board_part_width = board_part.required_width();
 
 		for pair in statistics_part.iter().zip_longest(&board_part) {
 			let stat_and_board_lines: (&str, &str) = match pair {
@@ -173,143 +291,8 @@ impl GUI {
 
 		Ok(())
 	}
-}
-/*
-УРОВЕНЬ: 9999    <! . . . . . . . . .!>  ВПРАВО: →  ПОВЕРНУТЬ /->: E
-ВРЕМЯ:   999:59  <! .[][][] . . . . .!>  ВЛЕВО:  ←  ПОВЕРНУТЬ <-\: Q
-                 <! . . .[] . . . . .!>  ВНИЗ:   ↓  ОПУСТИТЬ:      SPACE
-     [][][]      <! . . . . . . . . .!>
-     []          <! . . . .[] . . . .!>  ВЫЙТИ: ESC
-                 <! . . . .[][][] . .!>
-                 <![] * * *[][] . .[]!>
-                 <![][][] *[][][][][]!>
-                 <!==================!>
-                   \/\/\/\/\/\/\/\/\/
-*/
 
-struct Board {
-	size: Size,
-	cells: BitVec,
-}
-
-impl Board {
-	pub fn new(size: Size) -> Self {
-		Self {size, cells: bitvec![0; size.area()] }
-	}
-}
-
-struct FrameUpdateData {
-	_delta_time: Duration,
-	frame_start_time: Instant,
-}
-
-struct GameState {
-	is_running: bool,
-
-	current_figure: &'static Figure,
-	current_figure_position: Position<i8>,
-	current_figure_rotation: Direction,
-
-	next_figure: &'static Figure,
-	last_figure_lowering_time: Instant,
-	lines_hit: u16,
-	score: u16,
-	start_time: Instant,
-
-	board: Board,
-	gui: GUI,
-}
-impl GameState {
-	const BASE_FIGURE_LOWERING_DURATION: Duration = Duration::from_millis(2500); // 2.5s  | 2 раза за 5 секунд
-	const MIN_FIGURE_LOWERING_DURATION: Duration = Duration::from_millis(250);   // 0.25s | 4 раза в секунду
-
-	pub fn new() -> Self {
-		Self {
-			is_running: true,
-
-			current_figure: Figure::get_random(),
-			current_figure_position: Position { x: 0, y: 0 },
-			current_figure_rotation: Direction::South,
-
-			next_figure: Figure::get_random(),
-			last_figure_lowering_time: Instant::now(),
-			lines_hit: 0,
-			score: 0,
-			start_time: Instant::now(),
-
-			board: Board::new(Size {height: 15, width: 10}),
-			gui: GUI {},
-		}
-	}
-
-	pub fn update(&mut self, data: &FrameUpdateData) -> Result<(), Box<dyn std::error::Error>> {
-		let mut events_buffer = VecDeque::new();
-
-		while poll(Duration::from_millis(0))? {
-			match event::read()? {
-				Event::Key(key_event) => {
-					events_buffer.push_back(key_event);
-				}
-				_ => {}
-			}
-		}
-
-		if !events_buffer.is_empty() {
-			for key_event in events_buffer.iter() {
-				if !key_event.is_release() {
-					continue;
-				}
-
-				match key_event.code {
-					KeyCode::Esc => {
-						self.stop();
-						return Ok(());
-					}
-					KeyCode::Down => {
-						self.current_figure_position.y += 1;
-					},
-					KeyCode::Left => {
-						self.current_figure_position.x -= 1;
-					},
-					KeyCode::Right => {
-						self.current_figure_position.x += 1;
-					},
-					KeyCode::Char('q') => {
-						self.rotate_current_figure(false);
-					},
-					KeyCode::Char('e') => {
-						self.rotate_current_figure(true);
-					},
-					_ => (),
-				}
-			}
-		}
-
-		// Опускание фигуры
-		if data.frame_start_time.duration_since(self.last_figure_lowering_time) > self.get_figure_lowering_duration() {
-			self.current_figure_position.y += 1;
-			self.last_figure_lowering_time = data.frame_start_time;
-		}
-
-		self.gui.update(&GUIUpdateData {
-			board: &self.board,
-			current_figure: self.current_figure,
-			current_figure_position: &self.current_figure_position,
-			current_figure_rotation: self.current_figure_rotation,
-			next_figure: self.next_figure,
-			round_time: self.start_time.elapsed(),
-			level: self.get_level(),
-			score: self.score,
-		})?;
-
-		Ok(())
-	}
-
-	pub fn stop(&mut self) {
-		self.is_running = false;
-	}
-
-	pub fn rotate_current_figure(&mut self, clockwise: bool) {
+	fn rotate_current_figure(&mut self, clockwise: bool) {
 		use Direction::*;
 
 		self.current_figure_rotation = match (self.current_figure_rotation, clockwise) {
@@ -324,13 +307,13 @@ impl GameState {
 		}
 	}
 
-	pub fn get_figure_lowering_duration(&self) -> Duration {
+	fn get_figure_lowering_duration(&self) -> Duration {
 		max(
 			Self::BASE_FIGURE_LOWERING_DURATION - Duration::from_millis(self.get_level() as u64 * 10),
 			Self::MIN_FIGURE_LOWERING_DURATION
 		)
 	}
-	pub fn get_level(&self) -> u16 {
+	fn get_level(&self) -> u16 {
 		self.lines_hit + 1
 	}
 }
@@ -343,7 +326,6 @@ enum Direction {
 	North,
 	West,
 }
-
 
 struct Figure {
 	size: Size,
@@ -410,28 +392,53 @@ impl Figure {
 	}
 }
 
-const MAX_FPS: u16 = 120;
+
+type UniversalResult<T> = Result<T, Box<dyn std::error::Error>>;
+type UniversalProcedureResult = UniversalResult<()>;
+
+fn on_programm_enter(out: &mut Stdout) -> UniversalProcedureResult {
+	terminal::enable_raw_mode()?;
+	out.execute(Clear(ClearType::All))?; // После всё будет заполняться пробелами
+	out.execute(SetColors(Colors::new(FOREGROUND_COLOR, BACKGROUND_COLOR)))?;
+	out.execute(cursor::Hide)?;
+	Ok(())
+}
+fn on_programm_exit(out: &mut Stdout) -> UniversalProcedureResult {
+	out.execute(ResetColor)?;
+	terminal::disable_raw_mode()?;
+	Ok(())
+}
+
+const FOREGROUND_COLOR: Color = Color::Green;
+const BACKGROUND_COLOR: Color = Color::Black;
+
+const MAX_FPS: u16 = 60;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as u64);
 // Время на 1 кадр ↑
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+// TODO: Реализовать идею
+// static mut IS_RUNNING: bool = true;
+// fn exit_game()
+
+fn main() -> UniversalProcedureResult {
 	let mut game = GameState::new();
 
 	// for delta time
 	let mut previous_frame_start_time = Instant::now();
 
-	terminal::enable_raw_mode()?;
-
 	let mut out = stdout();
-	out.execute(SetForegroundColor(GUI::FOREGROUND_COLOR))?; // Для оптимизации
-	out.execute(Clear(ClearType::All))?; // После всё будет заполняться пробелами
-	out.execute(cursor::Hide)?;
-	while game.is_running {
+	on_programm_enter(&mut out)?;
+
+	while game.is_running() {
 		let frame_start_time = Instant::now();
 		let delta_time = frame_start_time.duration_since(previous_frame_start_time);
 		previous_frame_start_time = frame_start_time;
 
 		game.update(&FrameUpdateData { _delta_time: delta_time, frame_start_time })?;
+		game.update_gui()?;
+		// Решил вынести, т.к пускай лучше будут отдельные update методы для состояния и GUI
+		// Если будет надо, можно будет установить им разную скорость обновления
+		// А так просто как зачаток для состояния лобби и конца раунда, если решу добавить состояния
 
 		let frame_time = frame_start_time.elapsed();
 		// Если кадр обработался быстрее выделенного времени на кадр
@@ -439,9 +446,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			std::thread::sleep(FRAME_DURATION - frame_time);
 		}
 	}
-	out.execute(SetForegroundColor(Color::White))?;
-
-	terminal::disable_raw_mode()?;
+	on_programm_exit(&mut out)?;
 
 	Ok(())
 }
