@@ -1,4 +1,5 @@
 use std::cmp::{min};
+use std::fmt::format;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::collections::{VecDeque};
@@ -59,12 +60,7 @@ impl Board {
 }
 
 type Pixel = [char; 2];
-trait PixelLength {
-	const PX_LENGTH: usize;
-}
-impl PixelLength for [char; 2] {
-	const PX_LENGTH: usize = 2;
-}
+const PIXEL_LENGTH: usize = 2;
 
 // Хз какое название дать :/
 // Замена глобальной функции calc_width_for_lines(lines: &Vec<String>) -> usize
@@ -208,7 +204,7 @@ impl GameState {
 
 				// Должен ли работать таймер при паузе?
 				// Думаю нет, значит нужно что-то с ним придумать
-				if !(!self.is_paused || action == TogglePause || action == Exit) {
+				if PAUSING_FEATURE_ENABLED && !(!self.is_paused || action == TogglePause || action == Exit) {
 					return Ok(());
 				}
 
@@ -262,26 +258,24 @@ impl GameState {
                    \/\/\/\/\/\/\/\/\/
 	*/
 	pub fn render_frame(&self) -> Vec<String> {
-		const EMPTY_CELL: 		Pixel = [' ', ' '];
+		const EMPTY_PIXEL: 		Pixel = [' ', ' '];
 		const FIGURE_CELL:		Pixel = ['[', ']'];
-		const BOARD_EMPTY_CELL:	Pixel = [' ', '.'];
-		const LEFT_BORDER:		Pixel = ['<', '!'];
-		const RIGHT_BORDER:		Pixel = ['!', '>'];
-		const BOTTOM_BORDER:	Pixel = ['=', '='];
-		const BOTTOM_CLOSING:	Pixel = ['\\','/'];
-		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = EMPTY_CELL;
-		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = EMPTY_CELL;
+		const PREVIEW_CELL: 	Pixel = [' ', '*'];
+		const EMPTY_CELL: 		Pixel = [' ', '.'];
+		const LEFT_BORDER: 		Pixel = ['<', '!'];
+		const RIGHT_BORDER: 	Pixel = ['!', '>'];
+		const BOTTOM_BORDER: 	Pixel = ['=', '='];
+		const BOTTOM_CLOSING: 	Pixel = ['\\','/'];
+		const BOTTOM_CLOSING_LEFT_BORDER:  Pixel = EMPTY_PIXEL;
+		const BOTTOM_CLOSING_RIGHT_BORDER: Pixel = EMPTY_PIXEL;
+
+		const GAP_BETWEEN_PARTS: usize = 2;
 
 		const PAUSE_LABEL_FILLER: char = '=';
 		const PAUSE_LABEL_OPENING: char = '[';
 		const PAUSE_LABEL_CLOSING: char = ']';
 
-		const GAP_BETWEEN_PARTS: usize = 2;
-		let str_gap = String::from_iter(
-			iter::repeat_n(' ', GAP_BETWEEN_PARTS)
-		);
-
-		let statistics_part: Vec<String> = {
+		let statistics_part: Vec<String> = (|| { // <- Анонимная функция!
 			let round_total_seconds = self.start_time.elapsed().as_secs();
 			let label_and_value = [
 				("УРОВЕНЬ:", self.level().to_string()),
@@ -305,6 +299,11 @@ impl GameState {
 				)
 			);
 
+			// Следующая фигура не должна отображаться при паузе
+			if self.is_paused {
+				return lines;
+			}
+
 			let mut next_figure_part: Vec<String> = vec![];
 			{
 				let figure = self.next_figure;
@@ -319,7 +318,7 @@ impl GameState {
 						iter::once([' '; GAP_BETWEEN_PARTS])
 						.chain(
 							cells_row.iter().map(|cell| {
-								if *cell { FIGURE_CELL } else { EMPTY_CELL }
+								if *cell { FIGURE_CELL } else { EMPTY_PIXEL }
 							})
 						)
 						.flatten()
@@ -337,42 +336,55 @@ impl GameState {
 			}
 
 			lines
-		};
+		})();
 
 		let board_part: Vec<String> = {
 			let mut lines = vec![];
 			let board_width = self.board.size.width;
 			let pause_label_row = self.board.size.height / 2;
 
+			// Текущая фигура не должна отображаться при паузе
+
 			for row in 0..self.board.size.height {
 				let start_index = row * board_width;
-				//
 				let cells_row = &self.board.cells[start_index..start_index + board_width];
 
 				lines.push(
-					if self.is_paused && row == pause_label_row {
+					if !(self.is_paused && row == pause_label_row) {
+						iter::once(LEFT_BORDER)
+						.chain(cells_row.iter().map(|cell| {
+							if *cell {FIGURE_CELL} else {EMPTY_CELL}
+						}))
+						.chain(iter::once(RIGHT_BORDER))
+						.flatten()
+						.collect::<String>()
+					} else {
 						let mut line = String::new();
 						line.push(LEFT_BORDER[0]);
 						line.push(LEFT_BORDER[1]);
 
-						let width = board_width * Pixel::PX_LENGTH;
-						line.push_str(
-							format!( "{:*^width$}", format!("{}ПАУЗА{}", PAUSE_LABEL_OPENING, PAUSE_LABEL_CLOSING)
-							).replace("*", PAUSE_LABEL_FILLER.to_string().as_str()).as_str()
-						);
+						let width = board_width * PIXEL_LENGTH;
+
+						let label = format!("{} ПАУЗА {}", PAUSE_LABEL_OPENING, PAUSE_LABEL_CLOSING);
+						let label_len = label.chars().count();
+
+						// Отступы с двух сторон
+						let paddings_sum = width.saturating_sub(label_len);
+						let left_padding = paddings_sum / 2;
+						let right_padding = paddings_sum - left_padding;
+
+						for _ in 0..left_padding {
+							line.push(PAUSE_LABEL_FILLER);
+						}
+						line.push_str(&label);
+						for _ in 0..right_padding {
+							line.push(PAUSE_LABEL_FILLER);
+						}
 
 						line.push(RIGHT_BORDER[0]);
 						line.push(RIGHT_BORDER[1]);
 
 						line
-					} else {
-						iter::once(LEFT_BORDER)
-						.chain(cells_row.iter().map(|cell| {
-							if *cell {FIGURE_CELL} else {BOARD_EMPTY_CELL}
-						}))
-						.chain(iter::once(RIGHT_BORDER))
-						.flatten()
-						.collect::<String>()
 					}
 				);
 			}
@@ -380,7 +392,7 @@ impl GameState {
 			// Bottom line
 			lines.push(
 				iter::once(LEFT_BORDER)
-				.chain(iter::repeat(BOTTOM_BORDER).take(board_width))
+				.chain(iter::repeat_n(BOTTOM_BORDER, board_width))
 				.chain(iter::once(RIGHT_BORDER))
 				.flatten()
 				.collect::<String>()
@@ -389,7 +401,7 @@ impl GameState {
 			// Closing line
 			lines.push(
 				iter::once(BOTTOM_CLOSING_LEFT_BORDER)
-				.chain(iter::repeat(BOTTOM_CLOSING).take(board_width))
+				.chain(iter::repeat_n(BOTTOM_CLOSING, board_width))
 				.chain(iter::once(BOTTOM_CLOSING_RIGHT_BORDER))
 				.flatten()
 				.collect::<String>()
@@ -402,6 +414,9 @@ impl GameState {
 		let board_part_width = board_part.required_width();
 
 		let mut rendered_lines: Vec<String> = vec![];
+		let gap = String::from_iter(
+			iter::repeat_n(' ', GAP_BETWEEN_PARTS)
+		);
 		for pair in statistics_part.iter().zip_longest(&board_part) {
 			use EitherOrBoth::*;
 
@@ -412,7 +427,7 @@ impl GameState {
 			};
 
 			rendered_lines.push(format!(
-				"{:<stat_part_width$}{str_gap}{:<board_part_width$}",
+				"{:<stat_part_width$}{gap}{:<board_part_width$}",
 				stat_and_board_lines.0, stat_and_board_lines.1,)
 			);
 		}
@@ -420,8 +435,14 @@ impl GameState {
 		rendered_lines
 	}
 
-	// TODO: Добавить ограничение, чтобы поставить на паузу можно было только до N-тного уровня
+	// TODO: Добавить логику для усложнения паузы, чтобы не было абуза
 	fn toggle_pause(&mut self) {
+		// При снятии паузы игра должна провисеть 1 секунду,
+		// чтобы игрок увидел где текущая фигура и какая следующая
+
+		if !PAUSING_FEATURE_ENABLED {
+			return;
+		}
 		self.is_paused = !self.is_paused;
 	}
 
@@ -471,19 +492,32 @@ enum Direction {
 	West,
 }
 
+
+// TODO: перевести cells в массив размера 1, 2 или 4
+// со всеми вариантами поворота в формате bitarr клеток,
+// вычисляемых в конструкторе
 struct Figure {
 	size: Size,
 	cells: BitArray<[u8; 1]>, // До 8 клеток
 }
 impl Figure {
+	const fn new(size: Size, cells: BitArray<[u8; 1]>) -> Self {
+		Self { size, cells }
+	}
+
 	// size.area() должен быть == cells.count() !!!
 	// В const контексте нельзя вызвать .count(),
 	// поэтому без конструктора и проверок.
 	const VARIANTS: [Figure; 7] = [
-		Figure { // I
-			size: Size { height: 4, width: 1 },
-			cells: bitarr![const u8, Lsb0; 1, 1, 1, 1],
-		},
+		// Figure { // I
+		// 	size: Size { height: 4, width: 1 },
+		// 	cells: bitarr![const u8, Lsb0; 1, 1, 1, 1],
+		// },
+		// Перевести на это все фигуры, если будет работать
+		Figure::new( // I
+			Size { height: 4, width: 1 },
+			bitarr![const u8, Lsb0; 1, 1, 1, 1]
+		),
 		Figure { // J
 			size: Size { height: 3, width: 2 },
 			cells: bitarr![const u8, Lsb0;
@@ -578,6 +612,9 @@ const BACKGROUND_COLOR: Color = Color::Rgb { r: 4, g: 12, b: 2 };
 const FPS_LIMIT: u16 = 120;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / FPS_LIMIT as u64);
 // Время на 1 кадр ↑
+
+// Дореализую позже
+const PAUSING_FEATURE_ENABLED: bool = false;
 
 // Решил использовать AtomicBool чтобы не писать unsafe, а так тут это не имеет значения
 static IS_RUNNING: AtomicBool = AtomicBool::new(true);
