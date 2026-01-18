@@ -72,14 +72,6 @@ impl Board {
 		}
 	}
 
-	// Проверяет, может ли фигура быть размещена в данной позиции
-	pub fn can_place_figure(&self, figure: &Figure, pos: Position<u8>) -> bool {
-		self.can_place_figure_with_size(figure.size, |row, col| {
-			let figure_index = row * figure.size.width + col;
-			figure.cells[figure_index]
-		}, pos)
-	}
-
 	// Проверяет, может ли фигура быть размещена в данной позиции с произвольным размером и функцией получения клеток
 	fn can_place_figure_with_size<F>(&self, figure_size: Size, get_cell: F, pos: Position<u8>) -> bool
 	where
@@ -105,14 +97,6 @@ impl Board {
 			}
 		}
 		true
-	}
-
-	// Размещает фигуру на доске
-	pub fn place_figure(&mut self, figure: &Figure, pos: Position<u8>) {
-		self.place_figure_with_size(figure.size, |row, col| {
-			let figure_index = row * figure.size.width + col;
-			figure.cells[figure_index]
-		}, pos)
 	}
 
 	// Размещает фигуру на доске с произвольным размером и функцией получения клеток
@@ -156,25 +140,24 @@ impl Board {
 			return 0;
 		}
 
-		// Используем алгоритм "двух указателей" для правильного удаления всех линий за один проход
-		// read_row идет сверху вниз, write_row указывает куда копировать незаполненные линии
-		let mut write_row = 0;
-		for read_row in 0..self.size.height {
-			// Если эта линия не должна быть удалена, копируем её
+		lines_to_clear.sort();
+
+		// Алгоритм с двумя указателями, но работающий снизу вверх
+		let mut write_row = self.size.height - 1;
+		for read_row in (0..self.size.height).rev() {
 			if !lines_to_clear.contains(&read_row) {
 				if write_row != read_row {
-					// Копируем линию read_row в позицию write_row
 					for col in 0..self.size.width {
 						let value = self.get_cell(col, read_row);
 						self.set_cell(col, write_row, value);
 					}
 				}
-				write_row += 1;
+				write_row = write_row.saturating_sub(1);
 			}
 		}
 
-		// Очищаем оставшиеся линии сверху (они уже были скопированы или пустые)
-		for row in write_row..self.size.height {
+		// Очищаем оставшиеся линии сверху
+		for row in 0..=write_row {
 			for col in 0..self.size.width {
 				self.set_cell(col, row, false);
 			}
